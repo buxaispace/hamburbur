@@ -91,14 +91,24 @@ public class VoiceControls : Singleton<VoiceControls>
             ["jarvis", "system", "assistant", "friday", "echo", "cortana", "mainframe", "ultron", "terminal",];
 
     private bool              isListening;
+    private bool              localWakePaused = true;
+    private float             wakeReadyAt;
     private KeywordRecognizer wakeRecognizer;
+    private VoskWakeSpotter   localSpotter;
+    private string            wakeEngineName = "none";
+    private string            wakeDeviceName;
+    private int               micCursor = -1;
+    private float[]           micScratch;
+    private float[]           resampleScratch;
+    private AudioClip         ownedWakeClip;
+    private string            ownedWakeDevice;
 
     private IEpoopenator Start()
     {
         if (DisableJarvis.IsEnabled)
             yield break;
 
-        if (Application.platform != RuntimePlatform.WindowsPlayer || Environment.OSVersion.Version.Major < 10)
+        if (Application.platform != RuntimePlatform.WindowsPlayer)
         {
             NotificationManager.SendNotification(
                     "<color=red>Error</color>",
@@ -116,34 +126,72 @@ public class VoiceControls : Singleton<VoiceControls>
             Plugin.Instance.JarvisDidFirstInitialisation = true;
         }
 
-        // This gets annoying over time
+        wakeDeviceName = GameMic.Resolve(out string deviceSource);
+        VoiceManager voice = VoiceManager.Get();
+        if (voice != null && !string.IsNullOrEmpty(wakeDeviceName) && voice.DeviceName != wakeDeviceName)
+            voice.SwitchMicrophone(wakeDeviceName);
 
-        /*yield return AudioLib.Instance.SpeakRoutine("Hamburbur Voice Assistant active", 1f);
+        Log("MicDevice:" + deviceSource + ":" + DescribeDevice(wakeDeviceName));
 
-        string text = wakeWords.Aggregate("", (current, word) => current + $"[{word}]" + " ");
+        string enginePref = DaedalusConfig.WakeEngine;
+        bool   wantLocal  = !enginePref.Equals("KeywordRecognizer", StringComparison.OrdinalIgnoreCase);
+        bool   wantWin    = !enginePref.Equals("Local", StringComparison.OrdinalIgnoreCase) &&
+                            DaedalusConfig.WakeKeywordRecognizerFallback;
+
+        if (wantLocal && TryStartLocalSpotter())
+        {
+            wakeEngineName  = "local";
+            localWakePaused = false;
+            wakeReadyAt     = Time.unscaledTime;
+            Log("VoiceReady");
+            Log("WakeEngine:local");
+            yield break;
+        }
+
+        if (wantWin && TryStartKeywordRecognizer())
+        {
+            wakeEngineName = "KeywordRecognizer";
+            Log("VoiceReady");
+            Log("WakeEngine:KeywordRecognizer");
+            yield break;
+        }
 
         NotificationManager.SendNotification(
-                $"<color=#{ColorUtility.ToHtmlStringRGB(Plugin.Instance.MainColour)}>Jarvis</color>",
-                $"Speak a wake word to begin: {text}",
+                "<color=red>Error</color>",
+                "Voice wake word could not start",
                 5f,
                 false,
-                false);*/
-
-        wakeRecognizer                    =  new KeywordRecognizer(wakeWords);
-        wakeRecognizer.OnPhraseRecognized += OnWakeWordRecognized;
-        wakeRecognizer.Start();
-
-        Log("VoiceReady");
+                false);
     }
 
     private void OnDestroy()
     {
+        StopOwnedWakeMic();
+        localSpotter?.Dispose();
+        localSpotter = null;
+
         if (wakeRecognizer != null)
         {
             wakeRecognizer.OnPhraseRecognized -= OnWakeWordRecognized;
             wakeRecognizer.Dispose();
+            wakeRecognizer = null;
         }
+    }
 
+    private void Update()
+    {
+        if (DisableJarvis.IsEnabled || isListening || localWakePaused || localSpotter == null)
+            return;
+
+        if (GameMic.Exclusive || Time.unscaledTime < wakeReadyAt)
+            return;
+
+        if (!PumpLocalWake(out string word))
+            return;
+
+        Log("WakeWord");
+        LastUsedWakeWord = word;
+        StartCoroutine(StartCommandTurn());
     }
 
     private void OnWakeWordRecognized(PhraseRecognizedEventArgs args)
@@ -161,8 +209,11 @@ public class VoiceControls : Singleton<VoiceControls>
         isListening = true;
         StopWakeListening();
 
-        while (PhraseRecognitionSystem.Status != SpeechSystemStatus.Stopped)
-            yield return null;
+        if (wakeRecognizer != null)
+        {
+            while (PhraseRecognitionSystem.Status != SpeechSystemStatus.Stopped)
+                yield return null;
+        }
 
         yield return AudioLib.Instance.SpeakRoutine(replyWords[new Random().Next(replyWords.Length)], 1f);
 
@@ -221,8 +272,6 @@ public class VoiceControls : Singleton<VoiceControls>
             lowerText.StartsWith("shut up")    || lowerText.StartsWith("fuck you")   || lowerText.StartsWith("fuck off"))
         {
             VoiceManager.Get().AudioClip(MenuSoundsHandler.Instance.CancelSound);
-            wakeRecognizer.Start();
-
             yield break;
         }
 
@@ -656,17 +705,199 @@ public class VoiceControls : Singleton<VoiceControls>
 
     private void StopWakeListening()
     {
+        localWakePaused = true;
+        localSpotter?.Reset();
+        StopOwnedWakeMic();
+
         if (wakeRecognizer != null && wakeRecognizer.IsRunning())
             wakeRecognizer.Stop();
 
-        PhraseRecognitionSystem.Shutdown();
+        if (wakeRecognizer != null)
+            PhraseRecognitionSystem.Shutdown();
     }
 
     private void RestartWakeListening()
     {
+        wakeReadyAt = Time.unscaledTime + DaedalusConfig.WakeCooldownSeconds;
+        localSpotter?.Reset();
+        micCursor = -1;
+
+        if (localSpotter != null)
+            localWakePaused = false;
+
         if (wakeRecognizer != null && !wakeRecognizer.IsRunning())
             wakeRecognizer.Start();
     }
+
+    private bool TryStartLocalSpotter()
+    {
+        if (!WakeWordRuntime.TryEnsureExtracted(out string extractError))
+        {
+            Log("WakeEngine:local:skip:" + extractError);
+            return false;
+        }
+
+        if (!WakeWordRuntime.TryLoadNative(out string loadError))
+        {
+            Log("WakeEngine:local:skip:" + loadError);
+            return false;
+        }
+
+        try
+        {
+            localSpotter = new VoskWakeSpotter(WakeWordRuntime.ModelPath, DaedalusConfig.WakeMinConfidence);
+            string[] missing = localSpotter.MissingVocabulary();
+            if (missing.Length > 0)
+                Log("WakeVocabMissing:" + missing.Length);
+            return true;
+        }
+        catch (Exception exception)
+        {
+            Log("WakeEngine:local:skip:" + exception.GetType().Name);
+            localSpotter?.Dispose();
+            localSpotter = null;
+            return false;
+        }
+    }
+
+    private bool TryStartKeywordRecognizer()
+    {
+        if (Environment.OSVersion.Version.Major < 10)
+            return false;
+
+        try
+        {
+            wakeRecognizer                    =  new KeywordRecognizer(wakeWords);
+            wakeRecognizer.OnPhraseRecognized += OnWakeWordRecognized;
+            wakeRecognizer.Start();
+            return true;
+        }
+        catch (Exception)
+        {
+            wakeRecognizer = null;
+            return false;
+        }
+    }
+
+    private bool PumpLocalWake(out string word)
+    {
+        word = null;
+        int count = ReadWakeSamples(out float[] samples);
+        if (count <= 0)
+            return false;
+
+        int status = localSpotter.Accept(samples, count);
+        return localSpotter.TryGetWakeWord(out word, false, status);
+    }
+
+    private int ReadWakeSamples(out float[] samples)
+    {
+        samples = null;
+        VoiceManager voice = VoiceManager.Instance;
+        if (voice != null && !string.IsNullOrEmpty(voice.DeviceName))
+        {
+            if (micScratch == null)
+                micScratch = new float[voice.SamplingRate];
+
+            if (!voice.TryCopyNewMicSamples(ref micCursor, micScratch, out int written) || written <= 0)
+                return 0;
+
+            return DownsampleTo16k(micScratch, written, voice.SamplingRate, out samples);
+        }
+
+        if (ownedWakeClip == null)
+            StartOwnedWakeMic();
+
+        if (ownedWakeClip == null || string.IsNullOrEmpty(ownedWakeDevice))
+            return 0;
+
+        int pos = Microphone.GetPosition(ownedWakeDevice);
+        if (pos < 0)
+            return 0;
+
+        if (micCursor < 0)
+            micCursor = pos;
+
+        int available = pos < micCursor
+                                ? ownedWakeClip.samples - micCursor + pos
+                                : pos - micCursor;
+        if (available <= 0)
+            return 0;
+
+        if (micScratch == null || micScratch.Length < available)
+            micScratch = new float[available];
+
+        if (pos >= micCursor)
+        {
+            float[] window = new float[available];
+            ownedWakeClip.GetData(window, micCursor);
+            Array.Copy(window, micScratch, available);
+        }
+        else
+        {
+            int     tailLen = ownedWakeClip.samples - micCursor;
+            float[] tail    = new float[tailLen];
+            float[] head    = new float[pos];
+            ownedWakeClip.GetData(tail, micCursor);
+            if (pos > 0)
+                ownedWakeClip.GetData(head, 0);
+            Array.Copy(tail, 0, micScratch, 0, tailLen);
+            if (pos > 0)
+                Array.Copy(head, 0, micScratch, tailLen, pos);
+        }
+
+        micCursor = pos;
+        samples   = micScratch;
+        return available;
+    }
+
+    private int DownsampleTo16k(float[] input, int count, int sampleRate, out float[] output)
+    {
+        if (sampleRate <= VoskWakeSpotter.ModelSampleRate)
+        {
+            output = input;
+            return count;
+        }
+
+        double step = sampleRate / (double)VoskWakeSpotter.ModelSampleRate;
+        int    n    = Math.Max(1, (int)(count / step));
+        if (resampleScratch == null || resampleScratch.Length < n)
+            resampleScratch = new float[n];
+
+        for (int i = 0; i < n; i++)
+        {
+            int src = Math.Min(count - 1, (int)(i * step));
+            resampleScratch[i] = input[src];
+        }
+
+        output = resampleScratch;
+        return n;
+    }
+
+    private void StartOwnedWakeMic()
+    {
+        StopOwnedWakeMic();
+        string device = wakeDeviceName ?? GameMic.Resolve(out _);
+        if (string.IsNullOrEmpty(device) && (Microphone.devices == null || Microphone.devices.Length == 0))
+            return;
+
+        ownedWakeDevice = device;
+        ownedWakeClip   = Microphone.Start(ownedWakeDevice, true, 1, VoskWakeSpotter.ModelSampleRate);
+        micCursor       = -1;
+    }
+
+    private void StopOwnedWakeMic()
+    {
+        if (!string.IsNullOrEmpty(ownedWakeDevice) && Microphone.IsRecording(ownedWakeDevice))
+            Microphone.End(ownedWakeDevice);
+
+        ownedWakeClip   = null;
+        ownedWakeDevice = null;
+        micCursor       = -1;
+    }
+
+    private static string DescribeDevice(string device) =>
+            string.IsNullOrEmpty(device) ? "UnityDefault" : device;
 
     private void HandleDaedalusFailure(string stage, DaedalusApiResult result)
     {

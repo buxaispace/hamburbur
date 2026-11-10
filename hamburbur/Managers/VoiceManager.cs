@@ -89,6 +89,8 @@ public class VoiceManager : IAudioReader<float>
     /// </summary>
     public bool PostProcessClip { get; set; }
 
+    public string DeviceName => CurrentDevice;
+
     private string CurrentDevice { get; set; }
 
     public static VoiceManager Instance { get; private set; }
@@ -219,7 +221,13 @@ public class VoiceManager : IAudioReader<float>
     /// <returns></returns>
     public static VoiceManager Get(int loopLength = 1, string device = null)
     {
-        Instance ??= new VoiceManager(loopLength, device);
+        if (Instance == null)
+        {
+            if (string.IsNullOrEmpty(device))
+                device = hamburbur.Daedalus.GameMic.Resolve(out _);
+            Instance = new VoiceManager(loopLength, device);
+        }
+
         Instance.EnsureRoomLeaveHook();
 
         return Instance;
@@ -241,7 +249,9 @@ public class VoiceManager : IAudioReader<float>
             return false;
         }
 
-        CurrentDevice = string.IsNullOrEmpty(device) ? Microphone.devices[0] : device;
+        CurrentDevice = string.IsNullOrEmpty(device)
+                                ? hamburbur.Daedalus.GameMic.UnityDefault() ?? Microphone.devices[0]
+                                : device;
 
         if (Microphone.IsRecording(CurrentDevice))
             Microphone.End(CurrentDevice);
@@ -279,6 +289,54 @@ public class VoiceManager : IAudioReader<float>
     /// </summary>
     public bool RestartMicrophone()
         => StopRecording() && StartRecording(CurrentDevice);
+
+    /// <summary>
+    /// Copy newly captured microphone samples since <paramref name="cursor"/>.
+    /// Used by the local wake-word listener so it shares this clip instead of opening a second device.
+    /// </summary>
+    public bool TryCopyNewMicSamples(ref int cursor, float[] dest, out int written)
+    {
+        written = 0;
+        if (microphoneClip == null || dest == null || dest.Length == 0 || string.IsNullOrEmpty(CurrentDevice))
+            return false;
+
+        int pos = Microphone.GetPosition(CurrentDevice);
+        if (pos < 0)
+            return false;
+
+        if (cursor < 0 || cursor >= microphoneClip.samples)
+            cursor = pos;
+
+        int available = pos < cursor
+                                ? microphoneClip.samples - cursor + pos
+                                : pos - cursor;
+
+        if (available <= 0)
+            return false;
+
+        written = Math.Min(available, dest.Length);
+        int remaining = microphoneClip.samples - cursor;
+        float[] window = new float[written];
+        if (remaining >= written)
+        {
+            microphoneClip.GetData(window, cursor);
+        }
+        else
+        {
+            float[] tail = new float[remaining];
+            float[] head = new float[written - remaining];
+            microphoneClip.GetData(tail, cursor);
+            if (head.Length > 0)
+                microphoneClip.GetData(head, 0);
+            Array.Copy(tail, 0, window, 0, tail.Length);
+            Array.Copy(head, 0, window, tail.Length, head.Length);
+        }
+
+        Array.Copy(window, dest, written);
+
+        cursor = (cursor + written) % microphoneClip.samples;
+        return true;
+    }
 
     /// <summary>
     ///     Pushes an <see cref="UnityEngine.AudioClip" /> into the output stream.
