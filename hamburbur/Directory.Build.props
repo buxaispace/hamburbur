@@ -5,11 +5,26 @@
         <GameAssemblyPath>$(GamePath)\Gorilla Tag_Data\Managed</GameAssemblyPath>
         <BepInExAssemblyPath>$(GamePath)\BepInEx\core</BepInExAssemblyPath>
         <PluginsPath>$(GamePath)\BepInEx\plugins</PluginsPath>
+        <!-- Linux/CI: -p:GTManagedPath=... or -p:ManagedRefsPath=... to extracted Gorilla Tag Managed DLLs. Do not commit them. -->
+        <ManagedRefsPath Condition="'$(GTManagedPath)' != ''">$(GTManagedPath)</ManagedRefsPath>
+        <ManagedRefsPath Condition="'$(ManagedRefsPath)' == ''">$(MSBuildThisFileDirectory)local-refs</ManagedRefsPath>
+        <GTManagedPath Condition="'$(GTManagedPath)' == ''">$(ManagedRefsPath)</GTManagedPath>
     </PropertyGroup>
-    <PropertyGroup Condition="'$(CI)'=='TRUE'">
-        <GameAssemblyPath>.\Libs</GameAssemblyPath>
-        <BepInExAssemblyPath>.\Libs</BepInExAssemblyPath>
-        <PluginsPath>.\Libs</PluginsPath>
+    <PropertyGroup Condition="'$(CI)' == 'TRUE'">
+        <GameAssemblyPath>$(ManagedRefsPath)</GameAssemblyPath>
+        <BepInExAssemblyPath>$(ManagedRefsPath)</BepInExAssemblyPath>
+        <PluginsPath>$(ManagedRefsPath)</PluginsPath>
         <WarningLevel>0</WarningLevel>
+        <UseNuGetBepInEx>true</UseNuGetBepInEx>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(CI)' != 'TRUE' and ('$(GorillaTag_GamePath)' == '' or !Exists('$(GameAssemblyPath)')) and Exists('$(ManagedRefsPath)')">
+        <GameAssemblyPath>$(ManagedRefsPath)</GameAssemblyPath>
+        <BepInExAssemblyPath Condition="Exists('$(ManagedRefsPath)\BepInEx.dll')">$(ManagedRefsPath)</BepInExAssemblyPath>
+        <PluginsPath>$(ManagedRefsPath)</PluginsPath>
+        <UseNuGetBepInEx Condition="!Exists('$(BepInExAssemblyPath)\BepInEx.dll')">true</UseNuGetBepInEx>
+        <WarningLevel>0</WarningLevel>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(UseNuGetBepInEx)' == 'true'">
+        <RestoreAdditionalProjectSources>$(RestoreAdditionalProjectSources);https://nuget.bepinex.dev/v3/index.json</RestoreAdditionalProjectSources>
     </PropertyGroup>
 </Project>

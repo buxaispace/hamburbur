@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -6,6 +7,7 @@ using System.Text;
 using hamburbur.Managers;
 using hamburbur.Misc;
 using hamburbur.Mods.Settings;
+using hamburbur.Tools;
 using Newtonsoft.Json;
 using UnityEngine;
 using UnityEngine.Networking;
@@ -42,6 +44,41 @@ public class AudioLib : MonoBehaviour
     }
 
     public void SpeakText(string text, float volume = 1f) => StartCoroutine(SpeakRoutine(text, volume));
+
+    public IEnumerator SpeakReplyAudio(string audioField, string displayText)
+    {
+        if (!TryDecodeAudioField(audioField, out byte[] bytes, out AudioType audioType, out bool rawWav))
+        {
+            NotifyReply(displayText, 2.5f);
+            yield break;
+        }
+
+        AudioClip clip = null;
+        if (rawWav)
+        {
+            clip = ClipFromWav(bytes);
+        }
+        else
+        {
+            string tempPath = Path.Combine(Application.temporaryCachePath, "daedalus-reply.bin");
+            File.WriteAllBytes(tempPath, bytes);
+
+            using UnityWebRequest www = UnityWebRequestMultimedia.GetAudioClip("file://" + tempPath, audioType);
+            yield return www.SendWebRequest();
+
+            if (www.result == UnityWebRequest.Result.Success)
+                clip = DownloadHandlerAudioClip.GetContent(www);
+        }
+
+        if (clip == null)
+        {
+            Debug.LogWarning("[AudioLib] ReplyAudioUnavailable");
+            NotifyReply(displayText, 2.5f);
+            yield break;
+        }
+
+        yield return PlayClip(clip, displayText);
+    }
 
     public IEnumerator SpeakRoutine(string text, float volume)
     {
@@ -140,20 +177,127 @@ public class AudioLib : MonoBehaviour
         while (clip.loadState != AudioDataLoadState.Loaded)
             yield return null;
 
-        string wakeWord = VoiceControls.Instance.LastUsedWakeWord;
+        yield return PlayClip(clip, text);
+    }
 
+    private IEnumerator PlayClip(AudioClip clip, string displayText)
+    {
+        while (clip.loadState != AudioDataLoadState.Loaded)
+            yield return null;
+
+        NotifyReply(displayText, clip.length);
+        VoiceManager.Get().AudioClip(clip);
+        Debug.Log("[AudioLib] PlayingClip");
+
+        yield return new WaitForSeconds(clip.length);
+    }
+
+    private static void NotifyReply(string displayText, float duration)
+    {
+        if (!JarvisNotifications.IsEnabled || string.IsNullOrWhiteSpace(displayText))
+            return;
+
+        string wakeWord = VoiceControls.Instance != null ? VoiceControls.Instance.LastUsedWakeWord : "jarvis";
         if (!string.IsNullOrEmpty(wakeWord))
             wakeWord = char.ToUpper(wakeWord[0]) + wakeWord[1..];
 
-        if (JarvisNotifications.IsEnabled)
-            NotificationManager.SendNotification(
-                    $"<color=#{ColorUtility.ToHtmlStringRGB(Plugin.Instance.MainColour)}>{wakeWord}</color>",
-                    text, clip.length, false, false);
+        NotificationManager.SendNotification(
+                $"<color=#{ColorUtility.ToHtmlStringRGB(Plugin.Instance.MainColour)}>{wakeWord}</color>",
+                displayText, duration, false, false);
+    }
 
-        VoiceManager.Get().AudioClip(clip);
-        Debug.Log($"[AudioLib] Playing TTS clip '{text}' with length {clip.length} sec.");
+    private static bool TryDecodeAudioField(string audioField, out byte[] bytes, out AudioType audioType, out bool rawWav)
+    {
+        bytes    = null;
+        audioType = AudioType.WAV;
+        rawWav   = false;
 
-        yield return new WaitForSeconds(clip.length);
+        if (string.IsNullOrWhiteSpace(audioField))
+            return false;
+
+        string value = audioField.Trim();
+        string mime  = "";
+        string b64   = value;
+
+        const string Prefix = "data:";
+        if (value.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            int comma = value.IndexOf(',');
+            if (comma < 0)
+                return false;
+
+            string header = value[Prefix.Length..comma];
+            b64 = value[(comma + 1)..];
+            int slash = header.IndexOf(';');
+            mime = (slash >= 0 ? header[..slash] : header).Trim().ToLowerInvariant();
+        }
+
+        try
+        {
+            bytes = Convert.FromBase64String(b64);
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+
+        if (bytes == null || bytes.Length < 4)
+            return false;
+
+        bool isRiff = bytes.Length >= 12 && bytes[0] == (byte)'R' && bytes[1] == (byte)'I' &&
+                      bytes[2] == (byte)'F' && bytes[3] == (byte)'F';
+        bool isOgg  = bytes[0] == (byte)'O' && bytes[1] == (byte)'g' && bytes[2] == (byte)'g' && bytes[3] == (byte)'S';
+        bool isId3  = bytes[0] == (byte)'I' && bytes[1] == (byte)'D' && bytes[2] == (byte)'3';
+
+        if (mime.Contains("wav") || isRiff)
+        {
+            rawWav    = true;
+            audioType = AudioType.WAV;
+            return true;
+        }
+
+        if (mime.Contains("ogg") || isOgg)
+        {
+            audioType = AudioType.OGGVORBIS;
+            return true;
+        }
+
+        audioType = AudioType.MPEG;
+        return mime.Contains("mpeg") || mime.Contains("mp3") || isId3 || mime.Length == 0;
+    }
+
+    private static AudioClip ClipFromWav(byte[] wavFile)
+    {
+        try
+        {
+            WAV wav = new(wavFile);
+            if (wav.LeftChannel == null || wav.SampleCount <= 0)
+                return null;
+
+            AudioClip clip = AudioClip.Create("daedalus-reply", wav.SampleCount, wav.ChannelCount, wav.Frequency, false);
+            if (wav.ChannelCount == 2 && wav.RightChannel != null)
+            {
+                float[] interleaved = new float[wav.SampleCount * 2];
+                for (int i = 0; i < wav.SampleCount; i++)
+                {
+                    interleaved[i * 2]     = wav.LeftChannel[i];
+                    interleaved[i * 2 + 1] = wav.RightChannel[i];
+                }
+
+                clip.SetData(interleaved, 0);
+            }
+            else
+            {
+                clip.SetData(wav.LeftChannel, 0);
+            }
+
+            return clip;
+        }
+        catch (Exception)
+        {
+            Debug.LogWarning("[AudioLib] ReplyAudioUnavailable");
+            return null;
+        }
     }
 
     public static string GetSHA256(string text)

@@ -2,12 +2,12 @@
 
     <PropertyGroup>
         <TargetFramework>netstandard2.1</TargetFramework>
-        <LangVersion>Latest</LangVersion>
+        <LangVersion>preview</LangVersion>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     </PropertyGroup>
 
     <ItemGroup>
-        <Reference Include="0Harmony">
+        <Reference Include="0Harmony" Condition="Exists('$(BepInExAssemblyPath)\0Harmony.dll')">
             <HintPath>$(BepInExAssemblyPath)\0Harmony.dll</HintPath>
         </Reference>
         <Reference Include="Assembly-CSharp" Publicize="True">
@@ -25,10 +25,10 @@
         <Reference Include="BakeryRuntimeAssembly">
             <HintPath>$(GameAssemblyPath)\BakeryRuntimeAssembly.dll</HintPath>
         </Reference>
-        <Reference Include="BepInEx">
+        <Reference Include="BepInEx" Condition="Exists('$(BepInExAssemblyPath)\BepInEx.dll')">
             <HintPath>$(BepInExAssemblyPath)\BepInEx.dll</HintPath>
         </Reference>
-        <Reference Include="BepInEx.Harmony">
+        <Reference Include="BepInEx.Harmony" Condition="Exists('$(BepInExAssemblyPath)\BepInEx.Harmony.dll')">
             <HintPath>$(BepInExAssemblyPath)\BepInEx.Harmony.dll</HintPath>
         </Reference>
         <Reference Include="Cinemachine">
@@ -50,7 +50,7 @@
             <HintPath>$(GameAssemblyPath)\LIV.LCK_GorillaTag.dll</HintPath>
         </Reference>
         <Reference Include="Modio">
-          <HintPath>..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Gorilla Tag\Gorilla Tag_Data\Managed\Modio.dll</HintPath>
+            <HintPath>$(GameAssemblyPath)\Modio.dll</HintPath>
         </Reference>
         <Reference Include="Mono.Security">
             <HintPath>$(GameAssemblyPath)\Mono.Security.dll</HintPath>
@@ -127,7 +127,7 @@
         <Reference Include="Unity.Timeline">
             <HintPath>$(GameAssemblyPath)\Unity.Timeline.dll</HintPath>
         </Reference>
-        <Reference Include="Unity.Mathematics">
+        <Reference Include="Unity.TextMeshPro">
             <HintPath>$(GameAssemblyPath)\Unity.TextMeshPro.dll</HintPath>
         </Reference>
         <Reference Include="Unity.XR.Interaction.Toolkit">
@@ -333,6 +333,8 @@
             <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
         </PackageReference>
         <PackageReference Include="System.Collections.Immutable" Version="11.0.0-preview.3.26207.106"/>
+        <PackageReference Include="BepInEx.Core" Version="5.4.21" Condition="'$(UseNuGetBepInEx)' == 'true'" />
+        <PackageReference Include="HarmonyX" Version="2.10.2" Condition="'$(UseNuGetBepInEx)' == 'true'" />
     </ItemGroup>
 
     <ItemGroup>
