@@ -8,7 +8,7 @@ using UnityEngine;
 
 namespace hamburbur.Mods.OP;
 
-[hamburburmod(                "Lag Gun", "Lags whoever your hand desires", ButtonType.Togglable, AccessSetting.Public,
+[hamburburmod(                "Kick Gun[M]", "Kicks whoever your hand desires", ButtonType.Togglable, AccessSetting.Public,
         EnabledType.Disabled, 0)]
 public class LagGun : hamburburmod
 {
@@ -17,37 +17,38 @@ public class LagGun : hamburburmod
 
     protected override void Start() => gunLib.Start();
 
-    protected override void LateUpdate()
+  protected override void LateUpdate()
+{
+    gunLib.LateUpdate();
+
+    if (!PhotonNetwork.InRoom || !PhotonNetwork.IsMasterClient)
+        return;
+
+    if (!gunLib.IsShooting ||
+        gunLib.ChosenRig == null ||
+        Time.time <= eventDelay)
+        return;
+
+    int targetActor = gunLib.ChosenRig.GetNetPlayer().ActorNumber;
+
+    RaiseEventOptions raiseEventOptions = new()
     {
-        gunLib.LateUpdate();
+        TargetActors = [targetActor],
+        CachingOption = EventCaching.DoNotCache,
+    };
 
-        if (!PhotonNetwork.InRoom)
-            return;
+    // Photon PUN event 203: CloseConnection.
+    // The targeted client is instructed by the server to disconnect.
+    bool queued = PhotonNetwork.NetworkingClient.OpRaiseEvent(
+        203,
+        null,
+        raiseEventOptions,
+        SendOptions.SendReliable
+    );
 
-        if (!gunLib.IsShooting || gunLib.ChosenRig == null || !(Time.time > eventDelay))
-            return;
-
-        RaiseEventOptions raiseEventOptions = new()
-        {
-                TargetActors  = [gunLib.ChosenRig.GetNetPlayer().ActorNumber,],
-                CachingOption = EventCaching.DoNotCache,
-        };
-
-        for (int i = 0; i < 3500; i++)
-            PhotonNetwork.NetworkingClient.OpRaiseEvent(
-                    202,
-                    new object[]
-                    {
-                            -2147483647,
-                            76,
-                            float.NaN,
-                    },
-                    raiseEventOptions,
-                    new SendOptions { Encrypt = true, Reliability = false, DeliveryMode = DeliveryMode.Unreliable, }
-            );
-
+    if (queued)
         eventDelay = Time.time + 8.5f;
-    }
+}
 
     protected override void OnDisable() => gunLib.OnDisable();
 }
