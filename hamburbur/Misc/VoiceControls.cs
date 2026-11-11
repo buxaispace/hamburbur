@@ -1,11 +1,10 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
-using System.Text;
 using System.Text.RegularExpressions;
 using GorillaNetworking;
 using hamburbur.Components;
+using hamburbur.Daedalus;
 using hamburbur.GUI;
 using hamburbur.Libs;
 using hamburbur.Managers;
@@ -14,6 +13,7 @@ using hamburbur.Mods.Misc;
 using hamburbur.Mods.Rig;
 using hamburbur.Mods.Settings;
 using hamburbur.Plugins;
+using Newtonsoft.Json.Linq;
 using UnityEngine;
 using UnityEngine.Networking;
 using UnityEngine.Windows.Speech;
@@ -42,6 +42,8 @@ public class VoiceControls : Singleton<VoiceControls>
             RegexOptions.IgnoreCase);
 
     public string LastUsedWakeWord = "jarvis";
+
+    private int? daedalusConversationId;
 
     private readonly string[] replyWords =
     [
@@ -88,8 +90,6 @@ public class VoiceControls : Singleton<VoiceControls>
     private readonly string[] wakeWords =
             ["jarvis", "system", "assistant", "friday", "echo", "cortana", "mainframe", "ultron", "terminal",];
 
-    private DictationRecognizer dictationRecognizer;
-
     private bool              isListening;
     private KeywordRecognizer wakeRecognizer;
 
@@ -133,23 +133,7 @@ public class VoiceControls : Singleton<VoiceControls>
         wakeRecognizer.OnPhraseRecognized += OnWakeWordRecognized;
         wakeRecognizer.Start();
 
-        dictationRecognizer                   =  new DictationRecognizer();
-        dictationRecognizer.DictationResult   += OnDictationResult;
-        dictationRecognizer.DictationComplete += OnDictationComplete;
-        dictationRecognizer.DictationError += (error, hresult) =>
-                                              {
-                                                  if (!error.Contains(
-                                                              "Dictation support is not enabled on this device"))
-                                                      return;
-
-                                                  NotificationManager.SendNotification("<color=red>Error</color>",
-                                                          "Online Speech Recognition is not enabled on this device. Please enable in in privacy settings to use Voice Controls!",
-                                                          5f, true, true);
-
-                                                  Process.Start("ms-settings:privacy-speech");
-                                              };
-
-        Log("Voice system ready. Speak a wake word!");
+        Log("VoiceReady");
     }
 
     private void OnDestroy()
@@ -160,87 +144,77 @@ public class VoiceControls : Singleton<VoiceControls>
             wakeRecognizer.Dispose();
         }
 
-        if (dictationRecognizer != null)
-        {
-            dictationRecognizer.DictationResult   -= OnDictationResult;
-            dictationRecognizer.DictationComplete -= OnDictationComplete;
-            dictationRecognizer.Dispose();
-        }
     }
 
     private void OnWakeWordRecognized(PhraseRecognizedEventArgs args)
     {
-        Log($"Wake word detected: {args.text}");
+        Log("WakeWord");
         LastUsedWakeWord = args.text;
 
         if (!isListening)
-            StartCoroutine(StartDictationRoutine());
+            StartCoroutine(StartCommandTurn());
     }
 
     // ReSharper disable Unity.PerformanceAnalysis
-    private IEpoopenator StartDictationRoutine()
+    private IEpoopenator StartCommandTurn()
     {
         isListening = true;
-
-        if (wakeRecognizer != null && wakeRecognizer.IsRunning())
-        {
-            wakeRecognizer.Stop();
-            PhraseRecognitionSystem.Shutdown();
-        }
+        StopWakeListening();
 
         while (PhraseRecognitionSystem.Status != SpeechSystemStatus.Stopped)
             yield return null;
 
         yield return AudioLib.Instance.SpeakRoutine(replyWords[new Random().Next(replyWords.Length)], 1f);
 
-        //putting it here bc for some reason it can hear the tts and its fucking it up for me
-        dictationRecognizer.Start();
-        Log("Dictation started.");
+        CommandMicRecorder.Capture capture = null;
+        yield return CommandMicRecorder.RecordCommand(result => capture = result);
 
-        const float Timeout = 8f;
-        float       timer   = 0f;
-        while (dictationRecognizer.Status == SpeechSystemStatus.Running && timer < Timeout)
+        if (capture == null || !string.IsNullOrEmpty(capture.ErrorClass))
         {
-            timer += Time.deltaTime;
-
-            yield return null;
-        }
-
-        if (dictationRecognizer.Status == SpeechSystemStatus.Running)
-        {
-            dictationRecognizer.Stop();
-            PhraseRecognitionSystem.Shutdown();
-            Log("Dictation stopped due to timeout.");
-
+            Log("stt:error:" + (capture?.ErrorClass ?? "CaptureFailed"));
             VoiceManager.Get().AudioClip(MenuSoundsHandler.Instance.CancelSound);
-        }
-
-        if (wakeRecognizer != null && !wakeRecognizer.IsRunning())
-            wakeRecognizer.Start();
-
-        isListening = false;
-    }
-
-    private void OnDictationResult(string text, ConfidenceLevel confidence) =>
-            StartCoroutine(OnDictationResultRoutine(text, confidence));
-
-    private IEpoopenator OnDictationResultRoutine(string text, ConfidenceLevel confidence)
-    {
-        dictationRecognizer.Stop();
-        bool   hasYield  = false;
-        string lowerText = text.ToLower();
-
-        if (confidence == ConfidenceLevel.Low)
-        {
-            Log("Confidence level is low.");
-
-            yield return TTSSpeak("Pardon?");
-            wakeRecognizer.Start();
-
+            RestartWakeListening();
+            isListening = false;
             yield break;
         }
 
-        Log("You said: " + text);
+        if (capture.Wav == null || capture.Wav.Length == 0 || !capture.HadSpeech)
+        {
+            Log("stt:empty");
+            RestartWakeListening();
+            isListening = false;
+            yield break;
+        }
+
+        DaedalusApiResult stt = null;
+        yield return DaedalusApi.TranscribeWav(capture.Wav, result => stt = result);
+
+        if (stt == null || !stt.Ok)
+        {
+            HandleDaedalusFailure("stt", stt);
+            RestartWakeListening();
+            isListening = false;
+            yield break;
+        }
+
+        string text = DaedalusApi.TranscribeText(stt);
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            Log("stt:empty");
+            RestartWakeListening();
+            isListening = false;
+            yield break;
+        }
+
+        yield return HandleTranscript(text);
+        RestartWakeListening();
+        isListening = false;
+    }
+
+    private IEpoopenator HandleTranscript(string text)
+    {
+        bool   hasYield  = false;
+        string lowerText = text.ToLower();
 
         if (lowerText.StartsWith("nevermind")  || lowerText.StartsWith("never-mind") ||
             lowerText.StartsWith("never mind") || lowerText.StartsWith("cancel")     || lowerText.StartsWith("forget") ||
@@ -416,70 +390,80 @@ public class VoiceControls : Singleton<VoiceControls>
 
         if (!hasYield)
             yield return TTSSpeak("Pardon?");
-
-        if (wakeRecognizer != null && !wakeRecognizer.IsRunning())
-            wakeRecognizer.Start();
     }
 
 #region AI Stuff
 
     private IEpoopenator ProcessVoiceCommand(string input)
     {
-        // Legacy Pollinations API.
-        //
-        // input = Uri.EscapeDataString(input);
-        // string prompt = Uri.EscapeDataString(Constants.AIprompt);
-        // string api = $"https://text.pollinations.ai/{input}?system={prompt}?private=true?model=openai";
-        //
-        // using UnityWebRequest request = UnityWebRequest.Get(api);
-
-        const string Api          = "https://chat.hamburbur.org/api/chat";
         MenuSnapshot menuSnapshot = CreateMenuSnapshot();
-
-        string json = JsonUtility.ToJson(new ChatRequest
+        object game = new
         {
-                message = input,
-                menu    = menuSnapshot.Buttons,
-        });
+                client          = "hamburbur",
+                menu            = menuSnapshot.Buttons,
+                command_format  = "<[toggle|enable|disable|increment|decrement|press] id>",
+        };
 
-        Log($"Sending {menuSnapshot.Buttons.Count} menu buttons in {json.Length} JSON characters");
+        DaedalusApiResult chat = null;
+        yield return DaedalusApi.ChatSpeech(input, game, daedalusConversationId, result => chat = result);
 
-        using UnityWebRequest request = new(Api, UnityWebRequest.kHttpVerbPOST);
-
-        request.uploadHandler   = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json));
-        request.downloadHandler = new DownloadHandlerBuffer();
-
-        request.SetRequestHeader("Content-Type", "application/json");
-
-        yield return request.SendWebRequest();
-
-        if (request.result != UnityWebRequest.Result.Success)
+        if (chat == null || !chat.Ok)
         {
-            VoiceManager.Get().AudioClip(MenuSoundsHandler.Instance.CancelSound);
-
-            Debug.LogError(request.error);
-
-            yield return TTSSpeak("Could not fetch a response from the AI");
-
+            HandleDaedalusFailure("chat", chat);
             yield break;
         }
 
-        ChatResponse response = JsonUtility.FromJson<ChatResponse>(request.downloadHandler.text);
+        int? nextId = DaedalusApi.ChatConversationId(chat);
+        if (nextId.HasValue)
+            daedalusConversationId = nextId;
 
-        //VoiceManager.Get().AudioClip(MenuSoundsHandler.Instance.GotResponseSound);
+        string reply = DaedalusApi.ChatReply(chat);
+        ApplyDaedalusActions(DaedalusApi.ChatActions(chat), menuSnapshot);
+        string spokenResponse = string.IsNullOrWhiteSpace(reply)
+                                        ? "Done."
+                                        : ProcessJarvisResponse(reply, menuSnapshot);
 
-        if (response == null || string.IsNullOrWhiteSpace(response.response))
+        string audio = DaedalusApi.ChatAudioDataUri(chat);
+        if (!string.IsNullOrEmpty(audio))
+            yield return AudioLib.Instance.SpeakReplyAudio(audio, spokenResponse);
+        else
         {
-            yield return TTSSpeak("The AI returned an empty response.");
-
-            yield break;
+            Log("chat:audio:unavailable");
+            if (JarvisNotifications.IsEnabled)
+                NotificationManager.SendNotification(
+                        $"<color=#{ColorUtility.ToHtmlStringRGB(Plugin.Instance.MainColour)}>Jarvis</color>",
+                        spokenResponse, 3f, false, false);
         }
+    }
 
-        Log("AI raw response: " + response.response);
+    private void ApplyDaedalusActions(JArray actions, MenuSnapshot menuSnapshot)
+    {
+        if (actions == null || actions.Count == 0)
+            return;
 
-        string spokenResponse = ProcessJarvisResponse(response.response, menuSnapshot);
+        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
+        int applied = 0;
 
-        yield return TTSSpeak(spokenResponse);
+        foreach (JToken token in actions)
+        {
+            if (applied >= 4)
+                break;
+
+            if (token is not JObject obj)
+                continue;
+
+            string action = ((string)obj["action"] ?? (string)obj["type"] ?? (string)obj["op"] ?? "").Trim();
+            string target = ((string)obj["id"] ?? (string)obj["target"] ?? (string)obj["button"] ?? "").Trim();
+            if (string.IsNullOrEmpty(action) || string.IsNullOrEmpty(target))
+                continue;
+
+            string key = action + ":" + NormalizeCommandIdentifier(target);
+            if (!seen.Add(key))
+                continue;
+
+            ProcessJarvisResponse($"<[{action}] {target}>", menuSnapshot);
+            applied++;
+        }
     }
 
     private static MenuSnapshot CreateMenuSnapshot()
@@ -656,16 +640,6 @@ public class VoiceControls : Singleton<VoiceControls>
     }
 
     [Serializable]
-    private class ChatRequest
-    {
-        // ReSharper disable once InconsistentNaming
-        public string message;
-
-        // ReSharper disable once InconsistentNaming
-        public List<MenuButtonInfo> menu;
-    }
-
-    [Serializable]
     private class MenuButtonInfo
     {
         // ReSharper disable InconsistentNaming
@@ -678,21 +652,44 @@ public class VoiceControls : Singleton<VoiceControls>
         // ReSharper restore InconsistentNaming
     }
 
-    [Serializable]
-    private class ChatResponse
-    {
-        // ReSharper disable once InconsistentNaming
-        public string response;
-    }
-
 #endregion
 
-    // ReSharper disable once MemberCanBeMadeStatic.Local
-    private void OnDictationComplete(DictationCompletionCause cause)
+    private void StopWakeListening()
     {
-        Log($"Dictation completed: {cause}");
-        if (cause == DictationCompletionCause.TimeoutExceeded)
-            VoiceManager.Get().AudioClip(MenuSoundsHandler.Instance.CancelSound);
+        if (wakeRecognizer != null && wakeRecognizer.IsRunning())
+            wakeRecognizer.Stop();
+
+        PhraseRecognitionSystem.Shutdown();
+    }
+
+    private void RestartWakeListening()
+    {
+        if (wakeRecognizer != null && !wakeRecognizer.IsRunning())
+            wakeRecognizer.Start();
+    }
+
+    private void HandleDaedalusFailure(string stage, DaedalusApiResult result)
+    {
+        string errorClass = result?.ErrorClass ?? "Unknown";
+        long   status     = result?.Status ?? 0;
+        Log($"{stage}:error:{status}:{errorClass}");
+
+        VoiceManager.Get().AudioClip(MenuSoundsHandler.Instance.CancelSound);
+
+        string title = "<color=red>Error</color>";
+        string body = errorClass switch
+        {
+                "MissingKey" or "Unauthorized" => "Daedalus API key missing or invalid.",
+                "Forbidden"                    => "Talk is included with Plus and above.",
+                "BadRequest"                   => "Couldn't read recording.",
+                "PayloadTooLarge"              => "Recording was too long or empty.",
+                "RateLimited"                  => "Slow down and try again.",
+                "Unavailable" or "BadGateway"  => "Daedalus is unavailable.",
+                "InsecureBaseUrl"              => "Daedalus BaseUrl must be HTTPS.",
+                var _                          => "Could not reach Daedalus.",
+        };
+
+        NotificationManager.SendNotification(title, body, 5f, false, false);
     }
 
     private IEpoopenator TTSSpeak(string text)
@@ -700,7 +697,7 @@ public class VoiceControls : Singleton<VoiceControls>
         yield return AudioLib.Instance.SpeakRoutine(text, 1f);
     }
 
-    private void Log(string logMessage) => Debug.Log("[Hamburbur Voice Assistant] " + logMessage);
+    private static void Log(string logMessage) => Debug.Log("[Hamburbur Voice Assistant] " + logMessage);
 
     private string FormatTime(float time)
     {
