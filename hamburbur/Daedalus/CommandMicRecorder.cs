@@ -30,13 +30,16 @@ public static class CommandMicRecorder
         if (Microphone.devices == null || Microphone.devices.Length == 0)
         {
             capture.ErrorClass = "NoMicrophone";
+            GameMic.EndExclusive();
             done?.Invoke(capture);
             yield break;
         }
 
         VoiceManager voice    = VoiceManager.Get();
         bool         wasMuted = voice != null && voice.MuteMicrophone;
-        string       device   = Microphone.devices[0];
+        string       device   = GameMic.Resolve(out _) ?? Microphone.devices[0];
+
+        GameMic.BeginExclusive();
 
         if (voice != null)
         {
@@ -44,7 +47,7 @@ public static class CommandMicRecorder
             voice.StopRecording();
         }
 
-        if (Microphone.IsRecording(device))
+        if (!string.IsNullOrEmpty(device) && Microphone.IsRecording(device))
             Microphone.End(device);
 
         AudioClip clip = Microphone.Start(device, false, MaxSeconds, SampleRate);
@@ -52,6 +55,7 @@ public static class CommandMicRecorder
         {
             capture.ErrorClass = "MicrophoneStartFailed";
             RestoreVoice(voice, wasMuted);
+            GameMic.EndExclusive();
             done?.Invoke(capture);
             yield break;
         }
@@ -127,6 +131,7 @@ public static class CommandMicRecorder
         if (endPos <= 0)
         {
             RestoreVoice(voice, wasMuted);
+            GameMic.EndExclusive();
             done?.Invoke(capture);
             yield break;
         }
@@ -140,6 +145,7 @@ public static class CommandMicRecorder
         if (elapsed < MinHoldSeconds && !capture.HadSpeech)
         {
             RestoreVoice(voice, wasMuted);
+            GameMic.EndExclusive();
             done?.Invoke(capture);
             yield break;
         }
@@ -148,6 +154,7 @@ public static class CommandMicRecorder
             capture.Wav = WAV.WritePcm16Mono(samples, SampleRate);
 
         RestoreVoice(voice, wasMuted);
+        GameMic.EndExclusive();
         done?.Invoke(capture);
     }
 

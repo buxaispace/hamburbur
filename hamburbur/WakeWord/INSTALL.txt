@@ -1,0 +1,55 @@
+Hamburbur local wake word (offline Vosk)
+
+The Windows Speech KeywordRecognizer listens on the OS default recording device,
+which is often not the VR / Gorilla Tag mic. This build uses a local Vosk
+keyword grammar on the same Unity microphone Photon Voice / VoiceManager uses.
+No audio is streamed to a server for wake-word detection. No transcripts,
+audio, or dk_ keys are logged.
+
+Install
+-------
+1. Copy hamburbur.dll to:
+     <Gorilla Tag>/BepInEx/plugins/hamburbur.dll
+   (same place as before.)
+
+2. Copy hamburbur-wakeword-runtime.zip to EITHER:
+     <Gorilla Tag>/BepInEx/plugins/hamburbur-wakeword-runtime.zip
+   or extract it to:
+     <Gorilla Tag>/BepInEx/plugins/hamburbur/wakeword/
+   so that folder contains libvosk.dll, its MinGW DLLs, and a model/ directory.
+
+3. First launch extracts the zip if you copied it as a zip. Player.log should show:
+     [Hamburbur Voice Assistant] MicDevice:<source>:<device name>
+     [Hamburbur Voice Assistant] VoiceReady
+     [Hamburbur Voice Assistant] WakeEngine:local
+
+Runtime files (from the zip)
+----------------------------
+  libvosk.dll
+  libstdc++-6.dll
+  libgcc_s_seh-1.dll
+  libwinpthread-1.dll
+  model/          (vosk-model-small-en-us-0.15, Apache-2.0)
+  VERSION
+
+Sizes: model ~68MB on disk, native DLLs ~52MB. The zip is the compressed form.
+
+Config (BepInEx/config/org.hamburbur.menu.cfg)
+----------------------------------------------
+  Daedalus.BaseUrl
+  Daedalus.ApiKey                 (dk_…, never share)
+  WakeWord.Engine                 Auto | Local | KeywordRecognizer
+  WakeWord.Sensitivity            0..1 (default 0.55; higher = easier trigger)
+  WakeWord.CooldownSeconds        default 1.75; ignores wake after a turn
+  WakeWord.DeviceName             empty = Photon / VoiceManager / Unity default
+  WakeWord.KeywordRecognizerFallback   true = Windows Speech if Vosk cannot start
+
+Disable Jarvis still stops the assistant.
+
+Notes
+-----
+- cortana and ultron are not in the small Vosk vocabulary and will not fire.
+  The other wake words are: jarvis, system, assistant, friday, echo, mainframe, terminal.
+- KeywordRecognizer remains an optional fallback only (different mic, weaker on accents).
+- After a wake word, command audio is still sent to Daedalus POST /api/v1/transcribe
+  then POST /api/v1/chat (model daedalus-speech, game.client hamburbur + menu).

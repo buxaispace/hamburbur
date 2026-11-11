@@ -339,5 +339,6 @@
 
     <ItemGroup>
         <EmbeddedResource Include="Resources\hamburbur"/>
+        <EmbeddedResource Include="WakeWord\runtime.zip" Condition="Exists('WakeWord\runtime.zip')" LogicalName="hamburbur.wakeword.runtime.zip" />
     </ItemGroup>
 </Project>
